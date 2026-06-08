@@ -27,6 +27,13 @@
       </svg>
     </button>
 
+    <!-- 导出全图按钮 -->
+    <button class="ctrl-btn" title="导出全图" @click="exportFullMap">
+      <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+        <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+      </svg>
+    </button>
+
     <!-- 区域绘制下拉菜单 -->
     <transition name="menu-fade">
       <div v-if="areaDrawMenuVisible" class="area-draw-menu">
@@ -626,6 +633,55 @@ function downloadDataUrl(dataUrl) {
   link.click()
   document.body.removeChild(link)
   ElMessage.success('地图已导出为图片')
+}
+
+/** 导出全图：将当前窗口中的整个地图（所见即所得）保存为图片 */
+async function exportFullMap() {
+  if (!props.map) return
+  try {
+    const map = props.map
+    map.renderSync()
+
+    const mapEl = map.getTargetElement()
+    const pr = window.devicePixelRatio || 1
+    const w = mapEl.offsetWidth * pr
+    const h = mapEl.offsetHeight * pr
+
+    // 合并所有图层 canvas
+    const allCanvases = mapEl.querySelectorAll('canvas')
+    let exported = false
+
+    if (allCanvases.length > 0) {
+      try {
+        const fullCanvas = document.createElement('canvas')
+        fullCanvas.width = w
+        fullCanvas.height = h
+        const ctx = fullCanvas.getContext('2d')
+        for (const srcCanvas of allCanvases) {
+          ctx.drawImage(srcCanvas, 0, 0, w, h, 0, 0, w, h)
+        }
+        const dataUrl = fullCanvas.toDataURL('image/png')
+        downloadDataUrl(dataUrl)
+        exported = true
+      } catch (e) {
+        console.warn('canvas 合并导出失败，使用 html-to-image 兜底:', e)
+      }
+    }
+
+    // 兜底：html-to-image
+    if (!exported) {
+      const fullDataUrl = await toPng(mapEl, {
+        quality: 1,
+        pixelRatio: pr,
+        width: mapEl.offsetWidth,
+        height: mapEl.offsetHeight
+      })
+      downloadDataUrl(fullDataUrl)
+    }
+  } catch (e) {
+    console.error('导出全图失败:', e)
+    ElMessage.error('导出失败：' + (e.message || '未知错误'))
+  }
 }
 
 // 点击其他区域关闭菜单
