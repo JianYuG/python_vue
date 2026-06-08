@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.git/
+.env
+dist/
+build/
+*.spec
+start.bat
+build.bat

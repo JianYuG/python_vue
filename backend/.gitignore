@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# 环境配置
+.env
+
+# 上传文件
+uploads/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# 临时脚本
+_*.py
