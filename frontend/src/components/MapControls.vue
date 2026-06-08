@@ -14,6 +14,46 @@
       </svg>
     </button>
 
+    <!-- 区域绘制按钮 -->
+    <button
+      class="ctrl-btn"
+      :class="{ active: areaDrawActive }"
+      title="区域绘制"
+      @click="toggleAreaDrawMenu"
+    >
+      <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+        <path d="M3 5v14h18V5H3zm16 12H5V7h14v10z"/>
+        <path d="M7 9h4v4H7zm6 0h4v4h-4z" opacity="0.5"/>
+      </svg>
+    </button>
+
+    <!-- 区域绘制下拉菜单 -->
+    <transition name="menu-fade">
+      <div v-if="areaDrawMenuVisible" class="area-draw-menu">
+        <div class="adm-item" @click="startAreaDraw('Polygon')">
+          <svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><path d="M4 4l6 12L20 4z" opacity="0.5"/><path d="M3 3l7 14L21 3" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          <span>多边形</span>
+        </div>
+        <div class="adm-item" @click="startAreaDraw('Box')">
+          <svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><rect x="3" y="5" width="14" height="10" fill="none" stroke="currentColor" stroke-width="2" rx="1"/></svg>
+          <span>矩形</span>
+        </div>
+        <div class="adm-item" @click="startAreaDraw('Circle')">
+          <svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          <span>圆形</span>
+        </div>
+        <div v-if="areaDrawActive" class="adm-divider"></div>
+        <div v-if="areaDrawActive" class="adm-item adm-export" @click="exportMapImage">
+          <svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><path d="M3 17h14v-2H3v2zm4-6l3 3 3-3h-2V3H9v8H7z"/></svg>
+          <span>导出图片</span>
+        </div>
+        <div v-if="areaDrawActive" class="adm-item adm-clear" @click="clearAreaDraw">
+          <svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
+          <span>清除绘制</span>
+        </div>
+      </div>
+    </transition>
+
     <!-- 查询按钮 -->
     <button
       class="ctrl-btn"
@@ -101,13 +141,23 @@
 </template>
 
 <script setup>
-import { ref, watch, defineExpose, markRaw, onBeforeUnmount } from 'vue'
+import { ref, watch, defineExpose, markRaw, onBeforeUnmount, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
+import { toPng } from 'html-to-image'
 import VectorLayer from 'ol/layer/Vector'
 import VectorSource from 'ol/source/Vector'
 import Feature from 'ol/Feature'
 import WKT from 'ol/format/WKT'
-import { Style, Fill, Stroke, Circle as CircleStyle } from 'ol/style'
+import Draw, { createBox } from 'ol/interaction/Draw'
 import Modify from 'ol/interaction/Modify'
+import { Style, Fill, Stroke, Circle as CircleStyle, RegularShape } from 'ol/style'
+import Polygon from 'ol/geom/Polygon'
+import Circle from 'ol/geom/Circle'
+import Point from 'ol/geom/Point'
+import LineString from 'ol/geom/LineString'
+import { getArea, getLength } from 'ol/sphere'
+import { transform } from 'ol/proj'
+import { getWidth, getHeight } from 'ol/extent'
 import { getAllFeatures } from '../api/feature'
 
 // ★ OL 对象放在 setup 之外（模块级），完全脱离 Vue 响应式追踪
@@ -122,6 +172,470 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['feature-click', 'feature-close', 'edit-props', 'edit-save', 'edit-delete'])
+
+// ============ 区域绘制逻辑 ============
+const areaDrawMenuVisible = ref(false)
+const areaDrawActive = ref(false)
+let _areaDrawInteraction = null
+let _areaModifyInteraction = null
+let _areaSource = null
+let _areaLayer = null
+let _areaDrawType = null   // 记录当前绘制类型: 'Box' / 'Polygon' / 'Circle'
+let _edgeDragHandler = null  // 矩形边拖拽事件
+
+/** 区域绘制样式 */
+const AREA_DRAW_STYLE = new Style({
+  fill: new Fill({ color: 'rgba(64,158,255,0.15)' }),
+  stroke: new Stroke({ color: '#409eff', width: 2, lineDash: [6, 4] })
+})
+
+/** 矩形边中点样式（4条边的中点标记，用于拖拽调整） */
+const AREA_EDGE_STYLE = new Style({
+  image: new RegularShape({
+    points: 4,
+    radius: 6,
+    radius2: 0,
+    fill: new Fill({ color: '#fff' }),
+    stroke: new Stroke({ color: '#409eff', width: 2 }),
+    angle: 0
+  })
+})
+
+const AREA_VERTEX_STYLE = new Style({
+  image: new CircleStyle({
+    radius: 5,
+    fill: new Fill({ color: '#409eff' }),
+    stroke: new Stroke({ color: '#fff', width: 2 })
+  })
+})
+
+function areaStyleFunction(feature) {
+  return [AREA_DRAW_STYLE, AREA_VERTEX_STYLE]
+}
+
+/** 矩形专用样式：边框 + 角点 + 边中点 */
+function boxStyleFunction(feature) {
+  const styles = [AREA_DRAW_STYLE, AREA_VERTEX_STYLE]
+  // 如果是已完成的矩形（4个顶点），在每条边中点添加拖拽手柄
+  const geom = feature.getGeometry()
+  if (geom && geom.getType() === 'Polygon') {
+    const coords = geom.getCoordinates()[0]
+    if (coords && coords.length >= 5) {
+      // 4条边的中点：top, right, bottom, left
+      const midpoints = [
+        [(coords[0][0] + coords[1][0]) / 2, (coords[0][1] + coords[1][1]) / 2], // top
+        [(coords[1][0] + coords[2][0]) / 2, (coords[1][1] + coords[2][1]) / 2], // right
+        [(coords[2][0] + coords[3][0]) / 2, (coords[2][1] + coords[3][1]) / 2], // bottom
+        [(coords[3][0] + coords[0][0]) / 2, (coords[3][1] + coords[0][1]) / 2]  // left
+      ]
+      midpoints.forEach((pt, idx) => {
+        const s = new Style({
+          geometry: new Point(pt),
+          image: new RegularShape({
+            points: 4,
+            radius: 7,
+            radius2: 0,
+            fill: new Fill({ color: '#fff' }),
+            stroke: new Stroke({ color: '#e6a23c', width: 2 }),
+            angle: idx % 2 === 0 ? Math.PI / 4 : 0  // 上下=菱形, 左右=菱形
+          })
+        })
+        styles.push(s)
+      })
+    }
+  }
+  return styles
+}
+
+function toggleAreaDrawMenu() {
+  areaDrawMenuVisible.value = !areaDrawMenuVisible.value
+}
+
+/** 开始绘制指定类型的区域 */
+function startAreaDraw(type) {
+  if (!props.map) return
+  areaDrawMenuVisible.value = false
+
+  // 先清除上一次的绘制交互
+  cleanupAreaDrawInteraction()
+
+  // 确保有区域矢量图层
+  if (!_areaLayer) {
+    _areaSource = markRaw(new VectorSource())
+    _areaLayer = markRaw(new VectorLayer({
+      source: _areaSource,
+      style: areaStyleFunction,
+      zIndex: 60
+    }))
+    props.map.addLayer(_areaLayer)
+  }
+
+  // 记录绘制类型
+  _areaDrawType = type
+
+  // OpenLayers Draw 类型映射
+  let olType
+  if (type === 'Box') {
+    olType = 'Circle' // 矩形用 Circle 交互 + createBox 几何函数
+  } else if (type === 'Polygon') {
+    olType = 'Polygon'
+  } else {
+    olType = 'Circle'
+  }
+
+  const drawOpts = {
+    source: _areaSource,
+    type: olType,
+    style: AREA_DRAW_STYLE
+  }
+
+  // 矩形：用 Circle 交互 + createBox() 几何函数
+  if (type === 'Box') {
+    drawOpts.geometryFunction = createBox()
+  }
+
+  _areaDrawInteraction = markRaw(new Draw(drawOpts))
+
+  _areaDrawInteraction.on('drawend', (evt) => {
+    // 绘制完成
+    areaDrawActive.value = true
+    const drawType = type
+    // 先移除 Draw 交互，否则会和 Modify 冲突
+    setTimeout(() => {
+      cleanupAreaDrawInteraction()
+      if (drawType === 'Box') {
+        // 矩形：使用自定义边拖拽交互
+        _areaLayer.setStyle(boxStyleFunction)
+        attachBoxEdgeModify()
+      } else {
+        // 多边形/圆形：使用标准 Modify
+        attachAreaModify()
+      }
+      // 恢复默认光标
+      if (props.map) props.map.getTargetElement().style.cursor = ''
+    }, 100)
+  })
+
+  props.map.addInteraction(_areaDrawInteraction)
+  props.map.getTargetElement().style.cursor = 'crosshair'
+  ElMessage.info(`请在地图上绘制${type === 'Box' ? '矩形' : type === 'Polygon' ? '多边形' : '圆形'}区域`)
+}
+
+/** 为区域绘制图层挂载 Modify 交互（多边形/圆形用） */
+function attachAreaModify() {
+  if (!_areaSource || !props.map) return
+  cleanupAreaModify()
+  _areaModifyInteraction = markRaw(new Modify({
+    source: _areaSource,
+    style: AREA_VERTEX_STYLE
+  }))
+  props.map.addInteraction(_areaModifyInteraction)
+}
+
+/**
+ * 矩形边拖拽交互
+ * 拖拽矩形四条边整体移动，保持矩形形状
+ * 边中点手柄标识：上(0)、右(1)、下(2)、左(3)
+ */
+function attachBoxEdgeModify() {
+  if (!_areaSource || !props.map) return
+  cleanupBoxEdgeModify()
+
+  const map = props.map
+  let dragging = false
+  let dragEdge = -1       // 0=top, 1=right, 2=bottom, 3=left
+  let startPixel = null
+  let startCoords = null  // 矩形初始坐标
+
+  // pointerdown：检测并开始拖拽
+  const onPointerDown = function (evt) {
+    if (dragging) return
+    const features = _areaSource.getFeatures()
+    if (!features.length) return
+    const feature = features[features.length - 1]
+    const geom = feature.getGeometry()
+    if (!geom || geom.getType() !== 'Polygon') return
+
+    const pixel = evt.pixel
+    const coords = geom.getCoordinates()[0]
+    if (!coords || coords.length < 5) return
+
+    const midpoints = [
+      [(coords[0][0] + coords[1][0]) / 2, (coords[0][1] + coords[1][1]) / 2], // top
+      [(coords[1][0] + coords[2][0]) / 2, (coords[1][1] + coords[2][1]) / 2], // right
+      [(coords[2][0] + coords[3][0]) / 2, (coords[2][1] + coords[3][1]) / 2], // bottom
+      [(coords[3][0] + coords[0][0]) / 2, (coords[3][1] + coords[0][1]) / 2]  // left
+    ]
+
+    // 检查是否点击了边中点区域（12像素容差）
+    for (let i = 0; i < midpoints.length; i++) {
+      const midPixel = map.getPixelFromCoordinate(midpoints[i])
+      if (!midPixel) continue
+      const dx = pixel[0] - midPixel[0]
+      const dy = pixel[1] - midPixel[1]
+      if (Math.sqrt(dx * dx + dy * dy) < 12) {
+        dragging = true
+        dragEdge = i
+        startPixel = pixel.slice()
+        startCoords = coords.map(c => c.slice())
+        evt.stopPropagation()
+        return
+      }
+    }
+
+    // 检查是否靠近边线（6像素容差）
+    for (let i = 0; i < 4; i++) {
+      const p1 = coords[i]
+      const p2 = coords[i + 1]
+      const p1Px = map.getPixelFromCoordinate(p1)
+      const p2Px = map.getPixelFromCoordinate(p2)
+      if (!p1Px || !p2Px) continue
+      const dist = pointToSegmentDist(pixel[0], pixel[1], p1Px[0], p1Px[1], p2Px[0], p2Px[1])
+      if (dist < 6) {
+        dragging = true
+        dragEdge = i
+        startPixel = pixel.slice()
+        startCoords = coords.map(c => c.slice())
+        evt.stopPropagation()
+        return
+      }
+    }
+  }
+
+  // pointermove：拖拽中更新矩形
+  const onPointerMove = function (evt) {
+    if (!dragging) return
+    const features = _areaSource.getFeatures()
+    if (!features.length) return
+    const feature = features[features.length - 1]
+    const geom = feature.getGeometry()
+    if (!geom || geom.getType() !== 'Polygon') return
+
+    const coord = evt.coordinate
+    const dx = coord[0] - map.getCoordinateFromPixel(startPixel)[0]
+    const dy = coord[1] - map.getCoordinateFromPixel(startPixel)[1]
+    const newCoords = startCoords.map(c => c.slice())
+
+    switch (dragEdge) {
+      case 0: // top边：移动 vertex[0] 和 vertex[1] 的 y
+        newCoords[0][1] = startCoords[0][1] + dy
+        newCoords[1][1] = startCoords[1][1] + dy
+        break
+      case 1: // right边：移动 vertex[1] 和 vertex[2] 的 x
+        newCoords[1][0] = startCoords[1][0] + dx
+        newCoords[2][0] = startCoords[2][0] + dx
+        break
+      case 2: // bottom边：移动 vertex[2] 和 vertex[3] 的 y
+        newCoords[2][1] = startCoords[2][1] + dy
+        newCoords[3][1] = startCoords[3][1] + dy
+        break
+      case 3: // left边：移动 vertex[3] 和 vertex[0] 的 x
+        newCoords[3][0] = startCoords[3][0] + dx
+        newCoords[0][0] = startCoords[0][0] + dx
+        break
+    }
+    newCoords[4] = newCoords[0].slice()
+    geom.setCoordinates([newCoords])
+    feature.changed()
+  }
+
+  // 结束拖拽
+  const stopDrag = function () {
+    if (dragging) {
+      dragging = false
+      dragEdge = -1
+      startPixel = null
+      startCoords = null
+    }
+  }
+
+  map.on('pointerdown', onPointerDown)
+  map.on('pointermove', onPointerMove)
+  map.on('pointerup', stopDrag)
+  // 鼠标离开地图区域也要能释放
+  document.addEventListener('mouseup', stopDrag)
+
+  // 保存清理引用
+  _edgeDragCleanup = () => {
+    map.un('pointerdown', onPointerDown)
+    map.un('pointermove', onPointerMove)
+    map.un('pointerup', stopDrag)
+    document.removeEventListener('mouseup', stopDrag)
+  }
+}
+
+let _edgeDragCleanup = null
+
+function cleanupBoxEdgeModify() {
+  if (_edgeDragCleanup) {
+    _edgeDragCleanup()
+    _edgeDragCleanup = null
+  }
+  _edgeDragHandler = null
+}
+
+/** 点到线段的距离 */
+function pointToSegmentDist(px, py, x1, y1, x2, y2) {
+  const A = px - x1
+  const B = py - y1
+  const C = x2 - x1
+  const D = y2 - y1
+  const dot = A * C + B * D
+  const lenSq = C * C + D * D
+  let param = lenSq !== 0 ? dot / lenSq : -1
+  param = Math.max(0, Math.min(1, param))
+  const xx = x1 + param * C
+  const yy = y1 + param * D
+  return Math.sqrt((px - xx) * (px - xx) + (py - yy) * (py - yy))
+}
+
+/** 清除绘制交互（保留图层和 Modify） */
+function cleanupAreaDrawInteraction() {
+  if (_areaDrawInteraction && props.map) {
+    props.map.removeInteraction(_areaDrawInteraction)
+    _areaDrawInteraction = null
+  }
+}
+
+/** 清除 Modify 交互 */
+function cleanupAreaModify() {
+  if (_areaModifyInteraction && props.map) {
+    props.map.removeInteraction(_areaModifyInteraction)
+    _areaModifyInteraction = null
+  }
+}
+
+/** 清除全部区域绘制 */
+function clearAreaDraw() {
+  cleanupAreaDrawInteraction()
+  cleanupAreaModify()
+  cleanupBoxEdgeModify()
+  if (_areaSource) _areaSource.clear()
+  // 恢复默认样式
+  if (_areaLayer) _areaLayer.setStyle(areaStyleFunction)
+  areaDrawActive.value = false
+  areaDrawMenuVisible.value = false
+  _areaDrawType = null
+  if (props.map) props.map.getTargetElement().style.cursor = ''
+  ElMessage.success('已清除绘制区域')
+}
+
+/** 截图导出：将绘制区域范围内的地图画面（所见即所得）保存为图片 */
+async function exportMapImage() {
+  if (!props.map) return
+  areaDrawMenuVisible.value = false
+
+  if (!_areaSource || _areaSource.getFeatures().length === 0) {
+    ElMessage.warning('请先绘制一个区域再导出')
+    return
+  }
+
+  try {
+    const map = props.map
+    const drawFeature = _areaSource.getFeatures()[_areaSource.getFeatures().length - 1]
+    const drawExtent = drawFeature.getGeometry().getExtent()
+
+    // 计算绘制区域的像素范围
+    const bl = map.getPixelFromCoordinate([drawExtent[0], drawExtent[1]])
+    const tr = map.getPixelFromCoordinate([drawExtent[2], drawExtent[3]])
+    if (!bl || !tr) { ElMessage.error('无法获取区域坐标'); return }
+
+    const pr = window.devicePixelRatio || 1
+    const sx = Math.round(Math.min(bl[0], tr[0]) * pr)
+    const sy = Math.round(Math.min(bl[1], tr[1]) * pr)
+    const sw = Math.round(Math.abs(tr[0] - bl[0]) * pr)
+    const sh = Math.round(Math.abs(tr[1] - bl[1]) * pr)
+    if (sw <= 0 || sh <= 0) { ElMessage.error('绘制区域过小'); return }
+
+    // 隐藏绘制框，截图不应包含选择框
+    if (_areaLayer) _areaLayer.setVisible(false)
+    map.renderSync()
+
+    // OL 为每个图层创建独立的 canvas，需要合并所有 canvas
+    const mapEl = map.getTargetElement()
+    const allCanvases = mapEl.querySelectorAll('canvas')
+
+    let exported = false
+
+    // 方案1：合并所有 canvas 裁剪导出
+    if (allCanvases.length > 0) {
+      try {
+        const clipCanvas = document.createElement('canvas')
+        clipCanvas.width = sw
+        clipCanvas.height = sh
+        const ctx = clipCanvas.getContext('2d')
+
+        // 按图层顺序逐个合并 canvas
+        for (const srcCanvas of allCanvases) {
+          ctx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, sw, sh)
+        }
+
+        const dataUrl = clipCanvas.toDataURL('image/png')
+        if (_areaLayer) _areaLayer.setVisible(true)
+        downloadDataUrl(dataUrl)
+        exported = true
+      } catch (e) {
+        // canvas tainted，走方案2
+        console.warn('canvas 合并导出失败，使用 html-to-image 兜底:', e)
+      }
+    }
+
+    // 方案2：html-to-image 截取整个地图 DOM 后裁剪
+    if (!exported) {
+      try {
+        const fullDataUrl = await toPng(mapEl, {
+          quality: 1,
+          pixelRatio: pr,
+          width: mapEl.offsetWidth,
+          height: mapEl.offsetHeight
+        })
+
+        const img = new Image()
+        await new Promise((resolve, reject) => {
+          img.onload = resolve
+          img.onerror = reject
+          img.src = fullDataUrl
+        })
+
+        const clipCanvas = document.createElement('canvas')
+        clipCanvas.width = sw
+        clipCanvas.height = sh
+        const ctx = clipCanvas.getContext('2d')
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh)
+        const dataUrl = clipCanvas.toDataURL('image/png')
+        if (_areaLayer) _areaLayer.setVisible(true)
+        downloadDataUrl(dataUrl)
+      } catch (e2) {
+        if (_areaLayer) _areaLayer.setVisible(true)
+        throw e2
+      }
+    }
+  } catch (e) {
+    console.error('导出失败:', e)
+    ElMessage.error('导出失败：' + (e.message || '未知错误'))
+  }
+}
+
+/** 下载 dataUrl 为 PNG 文件 */
+function downloadDataUrl(dataUrl) {
+  const link = document.createElement('a')
+  const ts = new Date().toLocaleString().replace(/[/\s]/g, '_').replace(/:/g, '')
+  link.download = `地图导出_${ts}.png`
+  link.href = dataUrl
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  ElMessage.success('地图已导出为图片')
+}
+
+// 点击其他区域关闭菜单
+onMounted(() => {
+  document.addEventListener('click', (e) => {
+    if (areaDrawMenuVisible.value && !e.target.closest('.map-controls')) {
+      areaDrawMenuVisible.value = false
+    }
+  })
+})
 
 // 图层面板显示状态
 const layerPanelVisible = ref(false)
@@ -570,10 +1084,19 @@ onBeforeUnmount(() => {
   if (editMode.value) {
     toggleEditMode()
   }
+  // 清理区域绘制
+  cleanupAreaDrawInteraction()
+  cleanupAreaModify()
+  cleanupBoxEdgeModify()
+  if (_areaLayer && props.map) {
+    props.map.removeLayer(_areaLayer)
+    _areaLayer = null
+    _areaSource = null
+  }
 })
 
 // 暴露 initLayers/reloadLayers/deselectFeature 供父组件调用
-defineExpose({ initLayers, reloadLayers, deselectFeature })
+defineExpose({ initLayers, reloadLayers, deselectFeature, clearAreaDraw })
 </script>
 
 <style scoped>
@@ -720,6 +1243,66 @@ defineExpose({ initLayers, reloadLayers, deselectFeature })
 }
 .panel-slide-enter-from,
 .panel-slide-leave-to {
+  opacity: 0;
+  transform: translateX(10px);
+}
+
+/* 区域绘制下拉菜单 */
+.area-draw-menu {
+  position: absolute;
+  right: 44px;
+  bottom: 108px;
+  min-width: 140px;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+  z-index: 25;
+  user-select: none;
+}
+
+.adm-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: #303133;
+  cursor: pointer;
+  transition: background 0.15s;
+  border-bottom: 1px solid #f0f2f5;
+}
+
+.adm-item:last-child {
+  border-bottom: none;
+}
+
+.adm-item:hover {
+  background: #ecf5ff;
+}
+
+.adm-divider {
+  height: 1px;
+  background: #ebeef5;
+  margin: 0 12px;
+}
+
+.adm-export {
+  color: #67c23a !important;
+  font-weight: 500;
+}
+
+.adm-clear {
+  color: #f56c6c !important;
+  font-weight: 500;
+}
+
+.menu-fade-enter-active,
+.menu-fade-leave-active {
+  transition: opacity 0.15s, transform 0.15s;
+}
+.menu-fade-enter-from,
+.menu-fade-leave-to {
   opacity: 0;
   transform: translateX(10px);
 }

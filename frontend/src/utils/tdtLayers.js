@@ -64,14 +64,15 @@ const wmtsTileGrid = new WMTSTileGrid({
  */
 function createTiandituSource(layerType, visible) {
   return new WMTS({
-    url: `http://t{0-7}.tianditu.gov.cn/${layerType}_c/wmts?tk=${TIANDITU_TOKEN}`,
+    url: `https://t{0-7}.tianditu.gov.cn/${layerType}_c/wmts?tk=${TIANDITU_TOKEN}`,
     layer: layerType,
     matrixSet: 'c',
     format: 'tiles',
     projection: projection4490,
     tileGrid: wmtsTileGrid,
     style: 'default',
-    wrapX: true
+    wrapX: true,
+    crossOrigin: 'anonymous'
   })
 }
 
