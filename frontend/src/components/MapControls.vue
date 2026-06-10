@@ -527,7 +527,10 @@ function clearAreaDraw() {
   ElMessage.success('已清除绘制区域')
 }
 
-/** 截图导出：将绘制区域范围内的地图画面（所见即所得）保存为图片 */
+/** 截图导出：将绘制区域范围内的地图画面（所见即所得）保存为图片
+ *  矩形：直接裁剪矩形区域
+ *  圆形/多边形：先用 canvas clip 按实际形状裁剪，导出对应形状的图片
+ */
 async function exportMapImage() {
   if (!props.map) return
   areaDrawMenuVisible.value = false
@@ -540,9 +543,10 @@ async function exportMapImage() {
   try {
     const map = props.map
     const drawFeature = _areaSource.getFeatures()[_areaSource.getFeatures().length - 1]
-    const drawExtent = drawFeature.getGeometry().getExtent()
+    const drawGeom = drawFeature.getGeometry()
+    const drawExtent = drawGeom.getExtent()
 
-    // 计算绘制区域的像素范围
+    // 计算绘制区域的像素范围（包围盒）
     const bl = map.getPixelFromCoordinate([drawExtent[0], drawExtent[1]])
     const tr = map.getPixelFromCoordinate([drawExtent[2], drawExtent[3]])
     if (!bl || !tr) { ElMessage.error('无法获取区域坐标'); return }
@@ -562,63 +566,99 @@ async function exportMapImage() {
     const mapEl = map.getTargetElement()
     const allCanvases = mapEl.querySelectorAll('canvas')
 
-    let exported = false
+    // 先合并所有图层 canvas 到一个完整的地图 canvas
+    const mergedCanvas = document.createElement('canvas')
+    mergedCanvas.width = mapEl.offsetWidth * pr
+    mergedCanvas.height = mapEl.offsetHeight * pr
+    const mergedCtx = mergedCanvas.getContext('2d')
 
-    // 方案1：合并所有 canvas 裁剪导出
-    if (allCanvases.length > 0) {
+    let useHtmlToImage = false
+    for (const srcCanvas of allCanvases) {
       try {
-        const clipCanvas = document.createElement('canvas')
-        clipCanvas.width = sw
-        clipCanvas.height = sh
-        const ctx = clipCanvas.getContext('2d')
-
-        // 按图层顺序逐个合并 canvas
-        for (const srcCanvas of allCanvases) {
-          ctx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, sw, sh)
-        }
-
-        const dataUrl = clipCanvas.toDataURL('image/png')
-        if (_areaLayer) _areaLayer.setVisible(true)
-        downloadDataUrl(dataUrl)
-        exported = true
+        mergedCtx.drawImage(srcCanvas, 0, 0, mergedCanvas.width, mergedCanvas.height)
       } catch (e) {
-        // canvas tainted，走方案2
-        console.warn('canvas 合并导出失败，使用 html-to-image 兜底:', e)
+        console.warn('canvas 合并失败，使用 html-to-image 兜底:', e)
+        useHtmlToImage = true
+        break
       }
     }
 
-    // 方案2：html-to-image 截取整个地图 DOM 后裁剪
-    if (!exported) {
-      try {
-        const fullDataUrl = await toPng(mapEl, {
-          quality: 1,
-          pixelRatio: pr,
-          width: mapEl.offsetWidth,
-          height: mapEl.offsetHeight
-        })
-
-        const img = new Image()
-        await new Promise((resolve, reject) => {
-          img.onload = resolve
-          img.onerror = reject
-          img.src = fullDataUrl
-        })
-
-        const clipCanvas = document.createElement('canvas')
-        clipCanvas.width = sw
-        clipCanvas.height = sh
-        const ctx = clipCanvas.getContext('2d')
-        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh)
-        const dataUrl = clipCanvas.toDataURL('image/png')
-        if (_areaLayer) _areaLayer.setVisible(true)
-        downloadDataUrl(dataUrl)
-      } catch (e2) {
-        if (_areaLayer) _areaLayer.setVisible(true)
-        throw e2
-      }
+    // 兜底方案：html-to-image 截取整个地图 DOM
+    if (useHtmlToImage) {
+      const fullDataUrl = await toPng(mapEl, {
+        quality: 1,
+        pixelRatio: pr,
+        width: mapEl.offsetWidth,
+        height: mapEl.offsetHeight
+      })
+      const img = new Image()
+      await new Promise((resolve, reject) => {
+        img.onload = resolve
+        img.onerror = reject
+        img.src = fullDataUrl
+      })
+      mergedCtx.drawImage(img, 0, 0, mergedCanvas.width, mergedCanvas.height)
     }
+
+    // 创建裁剪 canvas
+    const clipCanvas = document.createElement('canvas')
+    clipCanvas.width = sw
+    clipCanvas.height = sh
+    const ctx = clipCanvas.getContext('2d')
+
+    // 根据绘制类型决定裁剪方式
+    const geomType = drawGeom.getType()
+
+    if (geomType === 'Circle') {
+      // 圆形：用椭圆 clip 路径裁剪
+      const center = drawGeom.getCenter()
+      const radius = drawGeom.getRadius()
+      // 圆心像素坐标
+      const centerPx = map.getPixelFromCoordinate(center)
+      // 圆半径在像素上的映射（取 x 方向和 y 方向的半径）
+      const edgeCoord = [center[0] + radius, center[1]]
+      const edgePx = map.getPixelFromCoordinate(edgeCoord)
+      const rx = Math.abs(edgePx[0] - centerPx[0]) * pr  // x方向像素半径
+      const ry = Math.abs(edgePx[1] - centerPx[1]) * pr   // 暂用x方向近似（地理投影下圆可能呈椭圆）
+      // 由于投影变形，圆在屏幕上可能呈椭圆，需要同时计算y方向半径
+      const edgeCoordY = [center[0], center[1] + radius]
+      const edgePxY = map.getPixelFromCoordinate(edgeCoordY)
+      const ryActual = Math.abs(edgePxY[1] - centerPx[1]) * pr
+      // 圆心在裁剪 canvas 上的相对位置
+      const cx = (centerPx[0] * pr) - sx
+      const cy = (centerPx[1] * pr) - sy
+
+      ctx.beginPath()
+      ctx.ellipse(cx, cy, rx, ryActual, 0, 0, Math.PI * 2)
+      ctx.clip()
+      ctx.drawImage(mergedCanvas, sx, sy, sw, sh, 0, 0, sw, sh)
+    } else if (geomType === 'Polygon' && _areaDrawType === 'Polygon') {
+      // 多边形（非矩形）：用多边形 clip 路径裁剪
+      const coords = drawGeom.getCoordinates()[0] // 外环坐标
+      ctx.beginPath()
+      coords.forEach((coord, i) => {
+        const px = map.getPixelFromCoordinate(coord)
+        if (!px) return
+        // 转换为裁剪 canvas 上的相对坐标
+        const x = px[0] * pr - sx
+        const y = px[1] * pr - sy
+        if (i === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+      })
+      ctx.closePath()
+      ctx.clip()
+      ctx.drawImage(mergedCanvas, sx, sy, sw, sh, 0, 0, sw, sh)
+    } else {
+      // 矩形或 Box：直接裁剪矩形区域（无需 clip 路径）
+      ctx.drawImage(mergedCanvas, sx, sy, sw, sh, 0, 0, sw, sh)
+    }
+
+    if (_areaLayer) _areaLayer.setVisible(true)
+    const dataUrl = clipCanvas.toDataURL('image/png')
+    downloadDataUrl(dataUrl)
   } catch (e) {
     console.error('导出失败:', e)
+    if (_areaLayer) _areaLayer.setVisible(true)
     ElMessage.error('导出失败：' + (e.message || '未知错误'))
   }
 }
