@@ -11,7 +11,6 @@
         filterable
         placeholder="行政区划（选填）"
         size="small"
-        style="width: 100%"
         @change="onXzqhChange"
       />
       <el-input
@@ -19,18 +18,18 @@
         placeholder="门牌名称（选填）"
         size="small"
         clearable
-        style="margin-top: 6px"
         @keyup.enter="doSearch"
-      />
-      <el-button
-        type="primary"
-        size="small"
-        :loading="searchLoading"
-        style="margin-top: 6px; width: 100%"
-        @click="doSearch"
       >
-        搜 索
-      </el-button>
+        <template #append>
+          <el-button
+            type="primary"
+            :loading="searchLoading"
+            @click="doSearch"
+          >
+            搜索
+          </el-button>
+        </template>
+      </el-input>
     </div>
 
     <!-- 搜索结果区 -->
@@ -187,18 +186,30 @@ function closeResult() {
 
 <style scoped>
 .search-panel {
-  background: rgba(255, 255, 255, 0.95);
+  background: rgba(255, 255, 255, 0.96);
   border-radius: 8px;
-  padding: 10px 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-  width: 280px;
+  padding: 12px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.12);
+  width: 380px;
   max-height: calc(100vh - 60px);
   overflow-y: auto;
 }
 
 .search-form {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.search-form :deep(.el-cascader) {
+  width: 160px;
+  flex-shrink: 0;
+}
+
+.search-form :deep(.el-input) {
+  flex: 1;
+  min-width: 0;
 }
 
 /* 搜索结果 */
