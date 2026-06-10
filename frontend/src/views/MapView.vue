@@ -8,9 +8,25 @@
       <SearchPanel @locate="onSearchLocate" @search-result="onSearchResult" @search-close="onSearchClose" @xzqh-locate="onXzqhLocate" />
     </div>
 
-    <!-- 右上角：绘制工具 -->
+    <!-- 右上角：工具箱 -->
     <div class="top-right">
-      <DrawToolbar ref="drawToolbarRef" :map="map" @draw-end="onDrawEnd" />
+      <div class="toolbox-wrapper">
+        <button class="toolbox-btn" title="工具箱" @click="toolboxVisible = !toolboxVisible">
+          <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14.75.75 0 0 1-.14 1.49.74.74 0 0 1-.47-.17A8.5 8.5 0 1 0 20.5 12c0-.23 0-.45-.02-.67a.75.75 0 0 1 1.5-.08l.02.75zm-3.85-7.62a.75.75 0 0 1 .15 1.05l-5.5 7.5a.75.75 0 0 1-1.1.12l-3-2.5a.75.75 0 0 1 .96-1.15l2.38 1.98 5.06-6.9a.75.75 0 0 1 1.05-.1z"/>
+            <path d="M4 4h4v4H4zm6 0h4v4h-4zm6 0h4v4h-4zM4 10h4v4H4zm6 0h4v4h-4zm6 0h4v4h-4zM4 16h4v4H4zm6 0h4v4h-4zm6 0h4v4h-4z" opacity="0.3"/>
+          </svg>
+          <span>工具箱</span>
+        </button>
+        <transition name="toolbox-fade">
+          <div v-if="toolboxVisible" class="toolbox-panel">
+            <div class="toolbox-header">
+              <span class="toolbox-title">绘制工具</span>
+            </div>
+            <DrawToolbar ref="drawToolbarRef" :map="map" @draw-end="onDrawEnd" />
+          </div>
+        </transition>
+      </div>
     </div>
 
     <!-- 右下角：地图控制按钮（放大/缩小/图层）+ 底图切换 -->
@@ -169,6 +185,7 @@ const mapContainer = ref(null)
 const map = shallowRef(null)
 const drawToolbarRef = ref(null)
 const mapControlsRef = ref(null)
+const toolboxVisible = ref(false)
 
 // 图层实例
 let vecLayer = null
@@ -625,6 +642,13 @@ async function onEditDelete({ id }) {
   }
 }
 
+/** 点击工具箱外部区域时关闭工具箱 */
+function onToolboxOutsideClick(e) {
+  if (toolboxVisible.value && !e.target.closest('.toolbox-wrapper')) {
+    toolboxVisible.value = false
+  }
+}
+
 onMounted(() => {
   initMap()
   // initMap 同步执行，map.value 已赋値，主动触发图层加载
@@ -649,9 +673,13 @@ onMounted(() => {
 
   // 初始层级
   coordInfo.zoom = map.value.getView().getZoom().toFixed(1)
+
+  // 点击外部区域关闭工具箱
+  document.addEventListener('click', onToolboxOutsideClick)
 })
 
 onBeforeUnmount(() => {
+  document.removeEventListener('click', onToolboxOutsideClick)
   if (map.value) {
     map.value.setTarget(null)
     map.value = null
@@ -686,6 +714,76 @@ onBeforeUnmount(() => {
   top: 12px;
   right: 16px;
   z-index: 10;
+}
+
+/* 工具箱 */
+.toolbox-wrapper {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.toolbox-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.95);
+  color: #303133;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+
+.toolbox-btn:hover {
+  background: #ecf5ff;
+  color: #409eff;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
+}
+
+.toolbox-panel {
+  margin-top: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  border-radius: 8px;
+  padding: 0;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+  min-width: 120px;
+}
+
+.toolbox-header {
+  padding: 8px 12px;
+  background: #f5f7fa;
+  border-bottom: 1px solid #ebeef5;
+}
+
+.toolbox-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.toolbox-panel :deep(.draw-toolbar) {
+  padding: 8px 12px;
+  background: transparent;
+  box-shadow: none;
+  justify-content: center;
+}
+
+/* 工具箱弹出动画 */
+.toolbox-fade-enter-active,
+.toolbox-fade-leave-active {
+  transition: opacity 0.18s, transform 0.18s;
+}
+.toolbox-fade-enter-from,
+.toolbox-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-8px);
 }
 
 /* 右下角：控制组合区域 */
