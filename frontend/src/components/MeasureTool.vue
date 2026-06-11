@@ -319,11 +319,8 @@ function onContextConfirm() {
 
 function onContextCancel() {
   closeContextMenu()
-  const type = activeType.value
-  stopMeasure()
-  if (type) {
-    setTimeout(() => toggleMeasure(type), 0)
-  }
+  // 取消绘制：关闭测量模式，清除草稿图形（不清除已完成的测量结果）
+  cancelMeasure()
 }
 
 /** 切换测量模式 */
@@ -385,6 +382,23 @@ function stopDrawInteraction() {
 /** 停止测量（含绘制交互） */
 function stopMeasure() {
   stopDrawInteraction()
+}
+
+/** 取消当前绘制：停止交互 + 清除草稿图形（保留已完成的测量结果） */
+function cancelMeasure() {
+  // 先移除交互，Draw 交互移除后草稿图形自动清除
+  stopDrawInteraction()
+  // 清除 source 中未完成的草稿要素（drawend 之前的中间状态）
+  // 由于 Draw 交互已移除，草稿不会添加到 source，但以防万一清理一下
+  if (measureSource && drawInteraction === null) {
+    // 移除没有样式（未完成）的要素，保留已设置样式的完成要素
+    const toRemove = []
+    measureSource.getFeatures().forEach(f => {
+      if (!f.getStyle()) toRemove.push(f)
+    })
+    toRemove.forEach(f => measureSource.removeFeature(f))
+  }
+  ElMessage.info('已取消绘制')
 }
 
 /** 清除所有测量结果 */
