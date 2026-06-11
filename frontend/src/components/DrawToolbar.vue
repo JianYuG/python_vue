@@ -329,6 +329,7 @@ onBeforeUnmount(() => {
 
 // 暴露给父组件
 defineExpose({
+  activeType,
   clearAll: () => {
     stopDraw()
     if (drawSource) drawSource.clear()

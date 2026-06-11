@@ -20,10 +20,18 @@
         </button>
         <transition name="toolbox-fade">
           <div v-if="toolboxVisible" class="toolbox-panel">
-            <div class="toolbox-header">
-              <span class="toolbox-title">绘制工具</span>
+            <div class="toolbox-section">
+              <div class="toolbox-header">
+                <span class="toolbox-title">绘制工具</span>
+              </div>
+              <DrawToolbar ref="drawToolbarRef" :map="map" @draw-end="onDrawEnd" />
             </div>
-            <DrawToolbar ref="drawToolbarRef" :map="map" @draw-end="onDrawEnd" />
+            <div class="toolbox-section">
+              <div class="toolbox-header">
+                <span class="toolbox-title">测量工具</span>
+              </div>
+              <MeasureTool ref="measureToolRef" :map="map" />
+            </div>
           </div>
         </transition>
       </div>
@@ -170,6 +178,7 @@ import {
   getProjection4490
 } from '../utils/tdtLayers'
 import DrawToolbar from '../components/DrawToolbar.vue'
+import MeasureTool from '../components/MeasureTool.vue'
 import FeatureFormDialog from '../components/FeatureFormDialog.vue'
 import SearchPanel from '../components/SearchPanel.vue'
 import MapControls from '../components/MapControls.vue'
@@ -185,6 +194,7 @@ const mapContainer = ref(null)
 const map = shallowRef(null)
 const drawToolbarRef = ref(null)
 const mapControlsRef = ref(null)
+const measureToolRef = ref(null)
 const toolboxVisible = ref(false)
 
 // 图层实例
@@ -642,9 +652,13 @@ async function onEditDelete({ id }) {
   }
 }
 
-/** 点击工具箱外部区域时关闭工具箱 */
+/** 点击工具箱外部区域时关闭工具箱（绘制/测量进行中不关闭） */
 function onToolboxOutsideClick(e) {
-  if (toolboxVisible.value && !e.target.closest('.toolbox-wrapper')) {
+  if (!toolboxVisible.value) return
+  // 正在绘制或测量中时不关闭面板
+  if (drawToolbarRef.value?.activeType) return
+  if (measureToolRef.value?.activeType) return
+  if (!e.target.closest('.toolbox-wrapper')) {
     toolboxVisible.value = false
   }
 }
@@ -753,7 +767,15 @@ onBeforeUnmount(() => {
   padding: 0;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
   overflow: hidden;
-  min-width: 120px;
+  min-width: 150px;
+}
+
+.toolbox-section {
+  border-bottom: 1px solid #ebeef5;
+}
+
+.toolbox-section:last-child {
+  border-bottom: none;
 }
 
 .toolbox-header {
@@ -768,7 +790,8 @@ onBeforeUnmount(() => {
   color: #303133;
 }
 
-.toolbox-panel :deep(.draw-toolbar) {
+.toolbox-panel :deep(.draw-toolbar),
+.toolbox-panel :deep(.measure-tool) {
   padding: 8px 12px;
   background: transparent;
   box-shadow: none;
