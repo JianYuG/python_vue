@@ -32,6 +32,12 @@
               </div>
               <MeasureTool ref="measureToolRef" :map="map" />
             </div>
+            <div class="toolbox-section">
+              <div class="toolbox-header">
+                <span class="toolbox-title">数据导入</span>
+              </div>
+              <DataImport ref="dataImportRef" :map="map" :has-imported-data="hasImportedData" @import-features="onImportFeatures" @clear-import="onClearImport" />
+            </div>
           </div>
         </transition>
       </div>
@@ -155,6 +161,21 @@
       @submit="onFormSubmit"
       @cancel="onFormCancel"
     />
+
+    <!-- 导入数据属性查看弹框 -->
+    <el-dialog
+      v-model="importAttrVisible"
+      title="要素属性"
+      width="600px"
+      class="attr-dialog"
+    >
+      <el-table :data="importAttrData" max-height="400" border size="small" stripe>
+        <el-table-column v-for="col in importAttrColumns" :key="col" :prop="col" :label="col" min-width="120" show-overflow-tooltip />
+      </el-table>
+      <template #footer>
+        <el-button @click="importAttrVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -179,6 +200,7 @@ import {
 } from '../utils/tdtLayers'
 import DrawToolbar from '../components/DrawToolbar.vue'
 import MeasureTool from '../components/MeasureTool.vue'
+import DataImport from '../components/DataImport.vue'
 import FeatureFormDialog from '../components/FeatureFormDialog.vue'
 import SearchPanel from '../components/SearchPanel.vue'
 import MapControls from '../components/MapControls.vue'
@@ -195,6 +217,7 @@ const map = shallowRef(null)
 const drawToolbarRef = ref(null)
 const mapControlsRef = ref(null)
 const measureToolRef = ref(null)
+const dataImportRef = ref(null)
 const toolboxVisible = ref(false)
 
 // 图层实例
@@ -227,6 +250,95 @@ const imagePreviewUrl = ref('')
 
 // 左下角坐标信息
 const coordInfo = reactive({ lng: '—', lat: '—', zoom: '—' })
+
+// ========== 导入数据管理（MapView 层面，不受工具箱 v-if 销毁影响） ==========
+const hasImportedData = ref(false)
+const importAttrVisible = ref(false)
+const importAttrColumns = ref([])
+const importAttrData = ref([])
+
+// 已导入图层列表（模块级变量，持久存在）
+const _importedLayers = []
+let _importClickHandler = null
+
+// 导入数据默认样式
+const IMPORT_STYLE = markRaw(new Style({
+  fill: new Fill({ color: 'rgba(64, 158, 255, 0.25)' }),
+  stroke: new Stroke({ color: '#409eff', width: 2 }),
+  image: new CircleStyle({
+    radius: 6,
+    fill: new Fill({ color: '#409eff' }),
+    stroke: new Stroke({ color: '#fff', width: 2 })
+  })
+}))
+
+/** DataImport 解析完成后的回调：创建图层、定位、注册点击 */
+function onImportFeatures({ features, count }) {
+  if (!map.value) return
+
+  const source = markRaw(new VectorSource({ features }))
+  const layer = markRaw(new VectorLayer({
+    source,
+    style: IMPORT_STYLE,
+    zIndex: 60
+  }))
+  map.value.addLayer(layer)
+  _importedLayers.push({ layer, source })
+
+  // 定位到数据范围
+  const extent = source.getExtent()
+  if (extent && isFinite(extent[0])) {
+    map.value.getView().fit(extent, { padding: [80, 80, 80, 80], duration: 800, maxZoom: 16 })
+  }
+
+  hasImportedData.value = true
+
+  // 注册点击查看属性（只注册一次）
+  if (!_importClickHandler) {
+    _importClickHandler = (evt) => {
+      if (!map.value) return
+      let hitFeature = null
+      map.value.forEachFeatureAtPixel(evt.pixel, (feature, layer) => {
+        if (!hitFeature && _importedLayers.some(il => il.layer === layer)) {
+          hitFeature = feature
+        }
+      })
+      if (hitFeature) {
+        showImportFeatureAttr(hitFeature)
+      }
+    }
+    map.value.on('singleclick', _importClickHandler)
+  }
+}
+
+/** 显示导入要素属性 */
+function showImportFeatureAttr(feature) {
+  const fprops = feature.getProperties()
+  const keys = Object.keys(fprops).filter(k => k !== 'geometry')
+  if (!keys.length) {
+    ElMessage.info('该要素无属性数据')
+    return
+  }
+  importAttrColumns.value = keys
+  importAttrData.value = [fprops]
+  importAttrVisible.value = true
+}
+
+/** 清除所有导入数据 */
+function onClearImport() {
+  if (!map.value) return
+  for (const { layer } of _importedLayers) {
+    map.value.removeLayer(layer)
+  }
+  _importedLayers.length = 0
+  if (_importClickHandler) {
+    map.value.un('singleclick', _importClickHandler)
+    _importClickHandler = null
+  }
+  hasImportedData.value = false
+  importAttrVisible.value = false
+  ElMessage.success('已清除导入数据')
+}
 
 function featureTypeLabel(type) {
   return { 1: '点要素', 2: '线要素', 3: '面要素' }[type] || '未知'
@@ -791,7 +903,8 @@ onBeforeUnmount(() => {
 }
 
 .toolbox-panel :deep(.draw-toolbar),
-.toolbox-panel :deep(.measure-tool) {
+.toolbox-panel :deep(.measure-tool),
+.toolbox-panel :deep(.data-import) {
   padding: 8px 12px;
   background: transparent;
   box-shadow: none;
@@ -1023,5 +1136,13 @@ onBeforeUnmount(() => {
 .detail-fade-leave-to {
   opacity: 0;
   transform: scale(0.95);
+}
+</style>
+
+<style>
+/* 导入属性弹框样式（非 scoped，覆盖 el-dialog） */
+.attr-dialog .el-dialog__header {
+  border-bottom: 1px solid #ebeef5;
+  padding-bottom: 12px;
 }
 </style>
