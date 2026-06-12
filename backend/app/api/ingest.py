@@ -67,6 +67,42 @@ def _pg_type(val) -> str:
     return "text"
 
 
+def _geojson_to_wkt(geo: dict) -> str:
+    """将 GeoJSON geometry dict 转为 WKT 字符串（支持常见几何类型）"""
+    gtype = geo.get("type", "")
+    coords = geo.get("coordinates")
+
+    def _fmt_coord(c):
+        return f"{c[0]} {c[1]}"
+
+    def _fmt_ring(ring):
+        return "(" + ", ".join(_fmt_coord(c) for c in ring) + ")"
+
+    if gtype == "Point":
+        return f"POINT ({_fmt_coord(coords)})"
+    elif gtype == "MultiPoint":
+        pts = ", ".join(f"({_fmt_coord(c)})" for c in coords)
+        return f"MULTIPOINT ({pts})"
+    elif gtype == "LineString":
+        return f"LINESTRING ({', '.join(_fmt_coord(c) for c in coords)})"
+    elif gtype == "MultiLineString":
+        lines = ", ".join(f"({', '.join(_fmt_coord(c) for c in line)})" for line in coords)
+        return f"MULTILINESTRING ({lines})"
+    elif gtype == "Polygon":
+        rings = ", ".join(_fmt_ring(r) for r in coords)
+        return f"POLYGON ({rings})"
+    elif gtype == "MultiPolygon":
+        polys = []
+        for poly in coords:
+            rings = ", ".join(_fmt_ring(r) for r in poly)
+            polys.append(f"({rings})")
+        return f"MULTIPOLYGON ({', '.join(polys)})"
+    elif gtype == "GeometryCollection":
+        geoms = [_geojson_to_wkt(g) for g in geo.get("geometries", [])]
+        return f"GEOMETRYCOLLECTION ({', '.join(g for g in geoms if g)})"
+    return ""
+
+
 def _infer_col_types(rows: List[dict], columns: List[str]) -> dict:
     """遍历前 200 行数据推断每列类型"""
     col_types = {c: "text" for c in columns}
@@ -125,19 +161,40 @@ async def _parse_file(file: UploadFile, content: bytes) -> List[dict]:
             if not shp_path:
                 raise ValueError("zip 中未找到 .shp 文件，请确保压缩包内包含 .shp/.dbf/.shx 文件")
 
-            # 显式用文件对象传入，完全绕过 pyshp 在 Windows 下的路径拼接 bug
             shp_dir = os.path.dirname(shp_path)
             shp_stem = os.path.splitext(os.path.basename(shp_path))[0]
 
-            def _find_file(stem, ext):
+            def _find_file(stem, fext):
                 """大小写不敏感查找文件"""
-                exact = os.path.join(shp_dir, stem + ext)
+                exact = os.path.join(shp_dir, stem + fext)
                 if os.path.exists(exact):
                     return exact
                 for f in os.listdir(shp_dir):
-                    if f.lower() == (stem + ext).lower():
+                    if f.lower() == (stem + fext).lower():
                         return os.path.join(shp_dir, f)
                 return None
+
+            # 读取 .prj 获取坐标系 SRID（默认 4326）
+            srid = 4326
+            prj_found = _find_file(shp_stem, ".prj")
+            if prj_found:
+                try:
+                    with open(prj_found, "r", encoding="utf-8", errors="ignore") as pf:
+                        prj_wkt = pf.read().strip()
+                    # 简单规则：含 "GCS_WGS_1984" 或 "WGS 1984" → 4326
+                    # 含 "CGCS2000" → 4490；含 "Beijing_1954" → 4214
+                    # 更精确需 pyproj，这里做常见匹配
+                    prj_upper = prj_wkt.upper()
+                    if "CGCS2000" in prj_upper or "CHINA_GEODETIC" in prj_upper:
+                        srid = 4490
+                    elif "BEIJING_1954" in prj_upper or "BEIJING 1954" in prj_upper:
+                        srid = 4214
+                    elif "XIAN_1980" in prj_upper or "XIAN 1980" in prj_upper:
+                        srid = 4610
+                    elif "WGS_1984" in prj_upper or "WGS 1984" in prj_upper:
+                        srid = 4326
+                except Exception:
+                    pass
 
             shp_file = open(shp_path, "rb")
             dbf_found = _find_file(shp_stem, ".dbf")
@@ -156,9 +213,14 @@ async def _parse_file(file: UploadFile, content: bytes) -> List[dict]:
                 for sr in sf.shapeRecords():
                     row = dict(zip(field_names, sr.record))
                     shape = sr.shape
+                    # 将几何转为 WKT，用特殊键传递给上层
                     if shape.shapeType != 0:
                         try:
-                            row["_geometry"] = str(shape.__geo_interface__)
+                            geo = shape.__geo_interface__
+                            wkt = _geojson_to_wkt(geo)
+                            if wkt:
+                                row["__geom_wkt__"] = wkt
+                                row["__geom_srid__"] = srid
                         except Exception:
                             pass
                     records.append(row)
@@ -216,12 +278,22 @@ async def upload_ingest(
     if not rows:
         return Result.bad_request(message="文件内容为空，无法入库")
 
-    # 处理列名（安全化）
-    raw_columns = list(rows[0].keys())
+    # 处理列名（安全化）；过滤掉几何特殊键
+    GEOM_KEYS = {"__geom_wkt__", "__geom_srid__"}
+    raw_columns = [k for k in rows[0].keys() if k not in GEOM_KEYS]
+
+    # 判断是否含几何信息（SHP 数据）
+    has_geom = any("__geom_wkt__" in row for row in rows)
+    # 取第一行有几何的 SRID
+    geom_srid = 4326
+    for row in rows:
+        if "__geom_srid__" in row:
+            geom_srid = row["__geom_srid__"]
+            break
+
     col_map = {}  # raw -> safe
     for rc in raw_columns:
         safe = _safe_col_name(rc)
-        # 避免重名
         base_safe = safe
         idx = 1
         while safe in col_map.values():
@@ -231,44 +303,54 @@ async def upload_ingest(
 
     safe_columns = list(col_map.values())
 
-    # 推断列类型
-    mapped_rows = [{col_map[k]: v for k, v in row.items()} for row in rows]
+    # 推断列类型（只看普通列）
+    mapped_rows = [{col_map[k]: v for k, v in row.items() if k in col_map} for row in rows]
     col_types = _infer_col_types(mapped_rows, safe_columns)
 
     # 生成唯一表名
     table_name = _gen_table_name()
 
-    # 动态建表 DDL
-    col_defs = ", ".join(
-        f'"{c}" {col_types[c]}' for c in safe_columns
-    )
+    # 动态建表 DDL（SHP 额外增加 geom 列）
+    col_defs = ", ".join(f'"{c}" {col_types[c]}' for c in safe_columns)
+    if has_geom:
+        col_defs += f', "geom" geometry(Geometry, {geom_srid})'
     create_ddl = f'CREATE TABLE IF NOT EXISTS "{table_name}" (id SERIAL PRIMARY KEY, {col_defs})'
     await db.execute(text(create_ddl))
 
     # 批量插入数据
     if mapped_rows:
-        cols_quoted = ", ".join(f'"{c}"' for c in safe_columns)
-        placeholders = ", ".join(f":{c}" for c in safe_columns)
-        insert_sql = text(
-            f'INSERT INTO "{table_name}" ({cols_quoted}) VALUES ({placeholders})'
-        )
-        # 处理 None 和空字符串
-        cleaned_rows = []
-        for row in mapped_rows:
-            cleaned = {}
-            for col in safe_columns:
-                val = row.get(col)
-                if val is None or (isinstance(val, str) and val.strip() == ""):
-                    cleaned[col] = None
-                else:
-                    cleaned[col] = val
-            cleaned_rows.append(cleaned)
+        if has_geom:
+            # 含几何：单独构建带 ST_GeomFromText 的 INSERT
+            cols_quoted = ", ".join(f'"{c}"' for c in safe_columns) + ', "geom"'
+            placeholders = ", ".join(f":{c}" for c in safe_columns) + \
+                           f", ST_GeomFromText(:__wkt__, {geom_srid})"
+            insert_sql = text(
+                f'INSERT INTO "{table_name}" ({cols_quoted}) VALUES ({placeholders})'
+            )
+            for raw_row, mapped_row in zip(rows, mapped_rows):
+                cleaned = {}
+                for col in safe_columns:
+                    val = mapped_row.get(col)
+                    cleaned[col] = None if (val is None or (isinstance(val, str) and val.strip() == "")) else val
+                cleaned["__wkt__"] = raw_row.get("__geom_wkt__") or None
+                await db.execute(insert_sql, cleaned)
+        else:
+            cols_quoted = ", ".join(f'"{c}"' for c in safe_columns)
+            placeholders = ", ".join(f":{c}" for c in safe_columns)
+            insert_sql = text(
+                f'INSERT INTO "{table_name}" ({cols_quoted}) VALUES ({placeholders})'
+            )
+            for row in mapped_rows:
+                cleaned = {}
+                for col in safe_columns:
+                    val = row.get(col)
+                    cleaned[col] = None if (val is None or (isinstance(val, str) and val.strip() == "")) else val
+                await db.execute(insert_sql, cleaned)
 
-        for row in cleaned_rows:
-            await db.execute(insert_sql, row)
-
-    # 保存元数据
+    # 保存元数据（geom 列单独记录）
     columns_info = [{"name": c, "type": col_types[c]} for c in safe_columns]
+    if has_geom:
+        columns_info.append({"name": "geom", "type": f"geometry(Geometry,{geom_srid})"})
     meta = IngestTable(
         original_filename=file.filename or "unknown",
         table_name=table_name,
