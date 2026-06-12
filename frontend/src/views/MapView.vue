@@ -38,6 +38,12 @@
               </div>
               <DataImport ref="dataImportRef" :map="map" :has-imported-data="hasImportedData" @import-features="onImportFeatures" @clear-import="onClearImport" />
             </div>
+            <div class="toolbox-section">
+              <div class="toolbox-header">
+                <span class="toolbox-title">数据入库</span>
+              </div>
+              <DataIngest />
+            </div>
           </div>
         </transition>
       </div>
@@ -201,6 +207,7 @@ import {
 import DrawToolbar from '../components/DrawToolbar.vue'
 import MeasureTool from '../components/MeasureTool.vue'
 import DataImport from '../components/DataImport.vue'
+import DataIngest from '../components/DataIngest.vue'
 import FeatureFormDialog from '../components/FeatureFormDialog.vue'
 import SearchPanel from '../components/SearchPanel.vue'
 import MapControls from '../components/MapControls.vue'
@@ -904,7 +911,8 @@ onBeforeUnmount(() => {
 
 .toolbox-panel :deep(.draw-toolbar),
 .toolbox-panel :deep(.measure-tool),
-.toolbox-panel :deep(.data-import) {
+.toolbox-panel :deep(.data-import),
+.toolbox-panel :deep(.data-ingest) {
   padding: 8px 12px;
   background: transparent;
   box-shadow: none;

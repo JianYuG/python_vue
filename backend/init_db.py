@@ -17,6 +17,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sqlalchemy import text
 from app.core.database import engine
 from app.models.sys_user import Base
+# 导入所有模型，确保 Base.metadata 中包含全部表定义
+import app.models.map_feature  # noqa
+import app.models.map_feature_attachment  # noqa
+import app.models.xzqh  # noqa
+import app.models.ingest_table  # noqa
 
 
 async def init_db():

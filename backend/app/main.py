@@ -6,6 +6,7 @@ from app.api.xzqh import router as xzqh_router
 from app.api.feature import router as feature_router
 from app.api.doorplate import router as doorplate_router
 from app.api.attachment import router as attachment_router
+from app.api.ingest import router as ingest_router
 from app.core.config import settings
 
 app = FastAPI(
@@ -30,6 +31,7 @@ app.include_router(xzqh_router)
 app.include_router(feature_router)
 app.include_router(doorplate_router)
 app.include_router(attachment_router)
+app.include_router(ingest_router)
 
 
 @app.get("/api/health", tags=["健康检查"])
