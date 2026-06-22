@@ -12,7 +12,7 @@
 import TileLayer from 'ol/layer/Tile'
 import WMTS from 'ol/source/WMTS'
 import WMTSTileGrid from 'ol/tilegrid/WMTS'
-import { addProjection } from 'ol/proj'
+import { addProjection, addCoordinateTransforms } from 'ol/proj'
 import Projection from 'ol/proj/Projection'
 import { getTopLeft, getWidth } from 'ol/extent'
 
@@ -31,6 +31,36 @@ const projection4490 = new Projection({
   axisOrientation: 'enu'
 })
 addProjection(projection4490)
+
+/**
+ * EPSG:4490 与 EPSG:4326 坐标数值完全相同，注册恒等变换函数让 OL 能够在两者间转换
+ */
+addCoordinateTransforms(
+  'EPSG:4326',
+  'EPSG:4490',
+  (coord) => coord,  // 4326 → 4490（恒等）
+  (coord) => coord   // 4490 → 4326（恒等）
+)
+addCoordinateTransforms(
+  'EPSG:4490',
+  'EPSG:3857',
+  (coord) => {
+    // 4490 → 3857：先当 4326 处理，再转 Mercator
+    const lon = coord[0]
+    const lat = coord[1]
+    const x = lon * 20037508.34 / 180
+    const y = Math.log(Math.tan((90 + lat) * Math.PI / 360)) / (Math.PI / 180) * 20037508.34 / 180
+    return [x, y]
+  },
+  (coord) => {
+    // 3857 → 4490
+    const x = coord[0]
+    const y = coord[1]
+    const lon = x * 180 / 20037508.34
+    const lat = Math.atan(Math.exp(y * Math.PI / 20037508.34)) * 360 / Math.PI - 90
+    return [lon, lat]
+  }
+)
 
 /**
  * 生成分辨率数组和矩阵 ID 数组

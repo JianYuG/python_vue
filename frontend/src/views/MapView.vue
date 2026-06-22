@@ -44,6 +44,19 @@
               </div>
               <DataIngest />
             </div>
+            <div class="toolbox-section">
+              <div class="toolbox-header">
+                <span class="toolbox-title">空间分析</span>
+              </div>
+              <SpatialAnalysis
+                @analysis-result="onAnalysisResult"
+                @clear-result="onClearAnalysisResult"
+                @request-pick-point="onRequestPickPoint"
+                @request-draw-bbox="onRequestDrawBbox"
+                @cancel-draw-bbox="_cancelDrawBbox"
+                @show-attr-table="analysisAttrVisible = true"
+              />
+            </div>
           </div>
         </transition>
       </div>
@@ -182,11 +195,34 @@
         <el-button @click="importAttrVisible = false">关闭</el-button>
       </template>
     </el-dialog>
+
+    <!-- 空间分析结果属性表弹框 -->
+    <el-dialog
+      v-model="analysisAttrVisible"
+      title="分析结果属性表"
+      width="700px"
+      class="attr-dialog analysis-attr-dialog"
+    >
+      <el-table :data="analysisAttrData" max-height="450" border size="small" stripe>
+        <el-table-column
+          v-for="col in analysisAttrColumns"
+          :key="col"
+          :prop="col"
+          :label="col"
+          min-width="120"
+          show-overflow-tooltip
+        />
+      </el-table>
+      <template #footer>
+        <span style="font-size:12px;color:#909399;margin-right:auto">共 {{ analysisAttrData.length }} 条</span>
+        <el-button @click="analysisAttrVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, shallowRef, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, shallowRef, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { markRaw } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Map from 'ol/Map'
@@ -208,9 +244,14 @@ import DrawToolbar from '../components/DrawToolbar.vue'
 import MeasureTool from '../components/MeasureTool.vue'
 import DataImport from '../components/DataImport.vue'
 import DataIngest from '../components/DataIngest.vue'
+import SpatialAnalysis from '../components/SpatialAnalysis.vue'
 import FeatureFormDialog from '../components/FeatureFormDialog.vue'
 import SearchPanel from '../components/SearchPanel.vue'
 import MapControls from '../components/MapControls.vue'
+import GeoJSON from 'ol/format/GeoJSON'
+import DragBox from 'ol/interaction/DragBox'
+import DragPan from 'ol/interaction/DragPan'
+import { always } from 'ol/events/condition'
 import { createFeature, updateFeature, deleteFeature } from '../api/feature'
 import { uploadAttachments, listAttachments, getAttachmentDownloadUrl, deleteAttachment } from '../api/attachment'
 
@@ -267,6 +308,17 @@ const importAttrData = ref([])
 // 已导入图层列表（模块级变量，持久存在）
 const _importedLayers = []
 let _importClickHandler = null
+
+// ========== 空间分析结果图层管理 ==========
+let _analysisLayer = null
+let _pickPointCallback = null  // 地图拾取点回调
+let _pickingActive = false     // 标记当前正在拾取点（用于工具箱关闭保护）
+let _drawBboxInteraction = null // 框选交互
+let _drawBboxCallback = null    // 框选结果回调
+
+const analysisAttrVisible = ref(false)
+const analysisAttrData = ref([])
+const analysisAttrColumns = ref([])
 
 // 导入数据默认样式
 const IMPORT_STYLE = markRaw(new Style({
@@ -345,6 +397,194 @@ function onClearImport() {
   hasImportedData.value = false
   importAttrVisible.value = false
   ElMessage.success('已清除导入数据')
+}
+
+// ========== 空间分析样式 ==========
+const ANALYSIS_STYLE = markRaw(new Style({
+  fill: new Fill({ color: 'rgba(255, 87, 34, 0.3)' }),
+  stroke: new Stroke({ color: '#ff5722', width: 2.5 }),
+  image: new CircleStyle({
+    radius: 6,
+    fill: new Fill({ color: '#ff5722' }),
+    stroke: new Stroke({ color: '#fff', width: 2 })
+  })
+}))
+
+const _geoJsonFormat = markRaw(new GeoJSON())
+
+/**
+ * 空间分析结果回调：将 GeoJSON FeatureCollection 渲染到地图并展示属性表
+ */
+function onAnalysisResult({ geojson, title, analysisType, attributes }) {
+  if (!map.value || !geojson) return
+
+  // 清除旧的分析图层
+  _clearAnalysisLayer()
+
+  // 解析 GeoJSON 为 OL Feature
+  let features = []
+  try {
+    features = _geoJsonFormat.readFeatures(geojson, {
+      dataProjection: 'EPSG:4326',
+      featureProjection: 'EPSG:4490'
+    })
+  } catch (e) {
+    console.warn('分析结果 GeoJSON 解析失败:', e)
+    return
+  }
+
+  if (!features.length) return
+
+  const source = markRaw(new VectorSource({ features: features.map(f => markRaw(f)) }))
+  _analysisLayer = markRaw(new VectorLayer({
+    source,
+    style: ANALYSIS_STYLE,
+    zIndex: 70
+  }))
+  map.value.addLayer(_analysisLayer)
+
+  // 定位到结果范围
+  const extent = source.getExtent()
+  if (extent && isFinite(extent[0])) {
+    map.value.getView().fit(extent, { padding: [80, 80, 80, 80], duration: 800, maxZoom: 16 })
+  }
+
+  // 构建属性表数据
+  if (attributes && attributes.length) {
+    analysisAttrData.value = attributes
+    analysisAttrColumns.value = Object.keys(attributes[0] || {})
+  } else {
+    const props = features.map(f => {
+      const p = f.getProperties()
+      const { geometry, ...rest } = p
+      return rest
+    }).filter(p => Object.keys(p).length > 0)
+    analysisAttrData.value = props
+    analysisAttrColumns.value = props.length ? Object.keys(props[0]) : []
+  }
+
+  // 数据设置完毕后自动弹出属性表
+  if (analysisAttrData.value.length > 0) {
+    nextTick(() => {
+      analysisAttrVisible.value = true
+    })
+  }
+}
+
+function _clearAnalysisLayer() {
+  if (_analysisLayer && map.value) {
+    map.value.removeLayer(_analysisLayer)
+    _analysisLayer = null
+  }
+}
+
+/** 清除分析结果（由 SpatialAnalysis 组件触发） */
+function onClearAnalysisResult() {
+  _clearAnalysisLayer()
+  analysisAttrVisible.value = false
+  analysisAttrData.value = []
+  analysisAttrColumns.value = []
+  _cancelPickPoint()
+  _cancelDrawBbox()
+}
+
+/**
+ * 地图单点拾取：SpatialAnalysis 组件请求在地图上拾取一个坐标点
+ */
+function onRequestPickPoint(callback) {
+  _cancelDrawBbox()
+  _cancelPickPoint()
+  _pickPointCallback = callback
+  _pickingActive = true
+  // 工具箱面板穿透，让 singleclick 能落在地图 canvas 上
+  const toolboxPanel = document.querySelector('.toolbox-panel')
+  if (toolboxPanel) toolboxPanel.style.pointerEvents = 'none'
+  // 改变鼠标样式提示用户
+  if (mapContainer.value) mapContainer.value.style.cursor = 'crosshair'
+  map.value.once('singleclick', _handlePickPoint)
+}
+
+function _handlePickPoint(evt) {
+  if (mapContainer.value) mapContainer.value.style.cursor = ''
+  // 恢复工具箱面板交互
+  const toolboxPanel = document.querySelector('.toolbox-panel')
+  if (toolboxPanel) toolboxPanel.style.pointerEvents = ''
+  const coord = evt.coordinate // [lng, lat] in EPSG:4490
+  const cb = _pickPointCallback
+  _pickPointCallback = null  // 先清空，再调用，避免 outsideClick 误判
+  // 延迟重置 _pickingActive，确保当前 click 事件的 outsideClick 检查通过
+  setTimeout(() => { _pickingActive = false }, 100)
+  if (cb) {
+    cb(coord[0], coord[1])
+  }
+}
+
+function _cancelPickPoint() {
+  if (_pickPointCallback || _pickingActive) {
+    map.value?.un('singleclick', _handlePickPoint)
+    _pickPointCallback = null
+    _pickingActive = false
+    if (mapContainer.value) mapContainer.value.style.cursor = ''
+    const toolboxPanel = document.querySelector('.toolbox-panel')
+    if (toolboxPanel) toolboxPanel.style.pointerEvents = ''
+  }
+}
+
+/**
+ * 地图框选 bbox：SpatialAnalysis 组件请求在地图上拉框选择范围
+ *
+ * 关键：工具箱面板浮在地图上层，mousedown 会被面板拦截，DragBox 无法接收地图拖拽事件。
+ * 解决方案：框选期间将工具箱面板隐藏（pointer-events:none），让鼠标事件穿透到地图 canvas。
+ * 同时禁用 DragPan 避免与 DragBox 争抢 pointerdrag 事件。
+ */
+function onRequestDrawBbox(callback) {
+  _cancelPickPoint()
+  _cancelDrawBbox()
+  _drawBboxCallback = callback
+
+  // 找到并禁用地图默认的 DragPan 交互
+  let dragPan = null
+  map.value?.getInteractions().forEach(interaction => {
+    if (interaction instanceof DragPan) dragPan = interaction
+  })
+  if (dragPan) dragPan.setActive(false)
+
+  // 将工具箱面板设为 pointer-events:none，鼠标事件穿透到地图 canvas
+  const toolboxPanel = document.querySelector('.toolbox-panel')
+  if (toolboxPanel) toolboxPanel.style.pointerEvents = 'none'
+
+  _drawBboxInteraction = new DragBox({ condition: always })
+  _drawBboxInteraction.on('boxend', () => {
+    const extent = _drawBboxInteraction.getGeometry().getExtent()
+    const cb = _drawBboxCallback
+    _drawBboxCallback = null
+    map.value?.removeInteraction(_drawBboxInteraction)
+    _drawBboxInteraction = null
+    if (mapContainer.value) mapContainer.value.style.cursor = ''
+    // 恢复 DragPan 和工具箱面板交互
+    if (dragPan) dragPan.setActive(true)
+    if (toolboxPanel) toolboxPanel.style.pointerEvents = ''
+    if (cb) cb(extent) // [minx, miny, maxx, maxy]
+  })
+  map.value?.addInteraction(_drawBboxInteraction)
+  if (mapContainer.value) mapContainer.value.style.cursor = 'crosshair'
+}
+
+function _cancelDrawBbox() {
+  // 恢复工具箱面板交互
+  const toolboxPanel = document.querySelector('.toolbox-panel')
+  if (toolboxPanel) toolboxPanel.style.pointerEvents = ''
+
+  if (_drawBboxInteraction) {
+    // 取消时恢复 DragPan
+    map.value?.getInteractions().forEach(interaction => {
+      if (interaction instanceof DragPan) interaction.setActive(true)
+    })
+    map.value?.removeInteraction(_drawBboxInteraction)
+    _drawBboxInteraction = null
+    if (mapContainer.value) mapContainer.value.style.cursor = ''
+  }
+  _drawBboxCallback = null
 }
 
 function featureTypeLabel(type) {
@@ -771,12 +1011,15 @@ async function onEditDelete({ id }) {
   }
 }
 
-/** 点击工具箱外部区域时关闭工具箱（绘制/测量进行中不关闭） */
+/** 点击工具箱外部区域时关闭工具箱（绘制/测量/空间分析交互进行中不关闭） */
 function onToolboxOutsideClick(e) {
   if (!toolboxVisible.value) return
   // 正在绘制或测量中时不关闭面板
   if (drawToolbarRef.value?.activeType) return
   if (measureToolRef.value?.activeType) return
+  // 正在拾取点或框选时不关闭面板
+  if (_pickPointCallback || _pickingActive) return
+  if (_drawBboxInteraction) return
   if (!e.target.closest('.toolbox-wrapper')) {
     toolboxVisible.value = false
   }
@@ -846,7 +1089,7 @@ onBeforeUnmount(() => {
   position: absolute;
   top: 12px;
   right: 16px;
-  z-index: 10;
+  z-index: 20;
 }
 
 /* 工具箱 */
@@ -885,8 +1128,10 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   padding: 0;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
-  overflow: hidden;
-  min-width: 150px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  max-height: calc(100vh - 120px);
+  min-width: 220px;
 }
 
 .toolbox-section {
@@ -912,7 +1157,8 @@ onBeforeUnmount(() => {
 .toolbox-panel :deep(.draw-toolbar),
 .toolbox-panel :deep(.measure-tool),
 .toolbox-panel :deep(.data-import),
-.toolbox-panel :deep(.data-ingest) {
+.toolbox-panel :deep(.data-ingest),
+.toolbox-panel :deep(.spatial-analysis) {
   padding: 8px 12px;
   background: transparent;
   box-shadow: none;
@@ -1152,5 +1398,12 @@ onBeforeUnmount(() => {
 .attr-dialog .el-dialog__header {
   border-bottom: 1px solid #ebeef5;
   padding-bottom: 12px;
+}
+
+/* 分析结果属性表：footer 两端对齐 */
+.analysis-attr-dialog .el-dialog__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 </style>

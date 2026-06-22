@@ -9,3 +9,5 @@ echo.
 
 call venv\Scripts\activate.bat
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8090 --reload
+
+@REM cd e:\xm_bjyt\zself\python_vue\backend; .\venv\Scripts\python.exe run.py --reload

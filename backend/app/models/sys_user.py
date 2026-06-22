@@ -1,4 +1,5 @@
 from sqlalchemy import Column, BigInteger, String, SmallInteger, DateTime, func
+from sqlalchemy.engine import default
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -15,7 +16,7 @@ class SysUser(Base):
     email = Column(String(100), nullable=True, comment="邮箱")
     phone = Column(String(20), nullable=True, comment="手机号")
     status = Column(SmallInteger, nullable=False, server_default="1", comment="状态: 1=正常, 0=禁用")
-    created_at = Column(DateTime, nullable=False, server_default=func.now(), comment="创建时间")
+    created_at = Column(DateTime, nullable=False, default=func.now(), insert_default=func.now(), server_default=func.now(), comment="创建时间")
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), comment="更新时间")
 
     @property

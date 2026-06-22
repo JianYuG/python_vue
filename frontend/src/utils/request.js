@@ -11,6 +11,9 @@ const request = axios.create({
   }
 })
 
+// 防止多个 401 请求重复弹窗和跳转
+let isRedirectingToLogin = false
+
 // 请求拦截器 —— 自动携带 Token
 request.interceptors.request.use(
   (config) => {
@@ -34,17 +37,16 @@ request.interceptors.response.use(
     if (res.code === 200) {
       return res
     }
-    // 业务错误
-    const message = res.message || '请求失败'
-    ElMessage.error(message)
 
     // 401 未授权 —— 跳转登录页
     if (res.code === 401) {
-      localStorage.removeItem('token')
-      localStorage.removeItem('userInfo')
-      router.push('/login')
+      handleLogout('登录已过期，请重新登录')
+      return Promise.reject(new Error('登录已过期'))
     }
 
+    // 其他业务错误
+    const message = res.message || '请求失败'
+    ElMessage.error(message)
     return Promise.reject(new Error(message))
   },
   (error) => {
@@ -57,11 +59,8 @@ request.interceptors.response.use(
           message = '请求参数错误'
           break
         case 401:
-          message = '未登录或Token已过期'
-          localStorage.removeItem('token')
-          localStorage.removeItem('userInfo')
-          router.push('/login')
-          break
+          handleLogout('登录已过期，请重新登录')
+          return Promise.reject(error)
         case 403:
           message = '无权限访问'
           break
@@ -88,5 +87,26 @@ request.interceptors.response.use(
     return Promise.reject(error)
   }
 )
+
+/**
+ * 统一处理登出跳转
+ */
+function handleLogout(message) {
+  if (isRedirectingToLogin) return
+  isRedirectingToLogin = true
+
+  localStorage.removeItem('token')
+  localStorage.removeItem('userInfo')
+
+  ElMessage.warning(message)
+
+  // 使用 router.replace 确保跳转更可靠
+  router.replace('/login').finally(() => {
+    // 延迟重置标志，防止快速连续请求
+    setTimeout(() => {
+      isRedirectingToLogin = false
+    }, 1000)
+  })
+}
 
 export default request
